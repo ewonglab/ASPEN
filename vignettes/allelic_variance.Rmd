@@ -1,0 +1,184 @@
+---
+title: "allelic_variance"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{allelic_variance}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+# Allelic variance test
+
+### Introduction
+
+Evaluating allele-specific expression (ASE) at single-cell level allows identify genes that are going through a transient activation state. Sometimes gene activation occurs gradually. In scRNA data, this gradual activation may appear as increased variation in the allelic ratio distribution. Genes with monoallelic expression (only one of the alleles is active) are one of the examples of stochastic gene activation. Within ASPEN, we can define monoallelic genes using parameters $\alpha$ and $\beta$. When $\alpha < 1$ or $\beta < 1$, beta-binomial distribution is skewed towards one of the alleles. When both $\alpha < 1$ and $\beta < 1$, beta-binomila distribution assumes a U-shape, whoch is associated with random monoallelic expression. 
+
+\\insert figure Supp1 E
+
+
+No all genes defined as monoallelic are activated in a stochastic manner. So, to select the genes with allelic variation different from the expected for genes with similar expression levels, ASPEN uses the allelic dispersion test. It compares the likelihood of a gene's allelic variation to follow the variation expected for genes with similar expression ($H_0$) vs. the likelihood of a gene's variation to follows the observed variation ($H_1$). The expected variation is the common dispersion, obtained by fitting a local linear regression model, and the observed variation is the estimated dispersion.\\
+
+We will be using the same CastB6 dataset to demonstrate ASPEN's ability to identify random monoallelic genes. The steps are the same as in the "Allelic imbalance test" vignette. If the users already have the object from beta_binom_test command, there's no need to re-run the steps shown here - all information required is there. \\ 
+
+
+```{r setup}
+library(ASPEN)
+library(gridExtra)
+```
+
+
+### Loading allele-specifc count data
+
+```{r}
+data("Cast_B6_a1")
+data("Cast_B6_tot")
+load_file <- system.file("extdata", "Cast_B6_cell_annot.xlsx", package = "ASPEN")
+cell_annot <- read.xlsx(load_file, rowNames = T)
+```
+
+
+
+### Data pre-processing
+Analysis of allelic imblanace will be done in each cell type separately. First, we split the metadata object by cell types. 
+```{r}
+#splitting the metadata by cell type
+cell_list <- split(cell_annot, f = cell_annot$cell_idents)
+```
+
+
+```{r}
+a1_mat <- lapply(cell_list, function(q) Cast_B6_a1[,gsub(".*_", "", colnames(Cast_B6_a1)) %in% q$cell_barcode_clean])
+tot_mat <- lapply(cell_list, function(q) Cast_B6_tot[,gsub(".*_", "", colnames(Cast_B6_tot)) %in% q$cell_barcode_clean])
+
+```
+
+
+Remove low-expressed genes that have counts in less than 10 cells
+```{r}
+#Remove low-expressed genes which have less than 10 cells 
+tot_mat  <- lapply(tot_mat, function(q) q[rowSums(q > 1) >= 10,])
+a1_mat  <- mapply(function(p, q) p[rownames(q),], 
+                  a1_mat, tot_mat, SIMPLIFY = F)
+
+```
+
+
+### Estimating beta-binomial parameters
+```{r}
+bb_init_params <- mapply(function(p, q) estim_bbparams(p, q, min_cells = 5, cores = 6), a1_mat, tot_mat, SIMPLIFY = F)
+```
+
+### Performing Bayesian shrinkage
+```{r}
+shrunk_estims <- lapply(bb_init_params, function(q) correct_theta_mod(q, delta_set = 20, N_set = 10, thetaFilter = 0.001))
+
+```
+
+
+### Estimating global beta-binomial parameters
+
+```{r}
+#genesXY <- system.file("inst/extdata", "mm10_genesXY.txt", package = "ASPEN")
+genesXY <- read.table("inst/extdata/mm10_genesXY.txt")
+genesIMPR <- read.xlsx("inst/extdata/mm10_imprinted_genes.xlsx", colNames = T)
+genes2remove <- c(genesXY$V1, genesIMPR$imprinted.genes)
+
+global_estims <- mapply(function(p, q)  glob_disp(p, q, genes.excl = genes2remove, min_counts = 5),
+                        a1_mat, tot_mat, SIMPLIFY = F)
+global_estims
+```
+
+
+### Allelic imbalance test 
+Running beta_binom_test function to identify genes with allelic ratio deviating from the null hypothesis.
+```{r, warning=F, message=F}
+bb_test_res <- mapply(function(p, q, r, s) beta_binom_test(p, q, r, min_cells = 5, glob_params = s), 
+                        a1_mat, tot_mat, shrunk_estims, global_estims, SIMPLIFY = F)
+```
+
+
+### Defining genes with monoallelic expression
+Genes with monoallelic expression are defined based on $\alpha < 1$ or $\beta < 1$.
+```{r}
+bb_test_res <- lapply(bb_test_res, function(q) {q$monoal <- ifelse(q$alpha < 1 | q$beta < 1, 1, 0);
+                                                return(q)}) 
+```
+
+Counting the number of genes with monoallelic expression
+```{r}
+lapply(bb_test_res, function(q) table(q$monoal))
+```
+
+```{r}
+lapply(bb_test_res, function(q) q[q$monoal == 1, c("AR", "fdr_mean", "fdr_disp")][1:10,])
+```
+
+
+Visualizing allelic ratio distribution for selected genes 
+```{r, fig.width=7.5, fig.height=4}
+#specifiying genes for plotting
+genes_select <- list("Olig2", "Meg3", "Kcnq1ot1")
+
+#generating data frame for plotting
+plot_data <- lapply(genes_select, function(q) makedf(a1_mat[[4]], tot_mat[[4]], gene = q))
+
+p_ar_dist <- mapply(function(p,q,r) plot_distr(p, gene = q),
+                 plot_data, genes_select, SIMPLIFY = F)
+do.call(grid.arrange, c(p_ar_dist, ncol = 3))
+```
+
+
+### Defining genes with monoallelic expression
+We define genes with stocastic monoalellic expression as those with $\alpha < 1$ and $\beta < 1$ and dispersion test $fdr < 0.05$.
+
+```{r}
+bb_test_res <- lapply(bb_test_res, function(q) {q$stochmon <- ifelse(q$alpha < 1 & q$beta < 1 & q$fdr_disp < 0.05, 1, 0);
+                                                return(q)}) 
+```
+
+
+
+Counting the number of genes with stochastic monoallelic expression
+```{r}
+lapply(bb_test_res, function(q) table(q$stochmon))
+```
+
+```{r}
+lapply(bb_test_res, function(q) q[q$stochmon == 1, c("AR", "fdr_mean", "fdr_disp")][1:10,])
+```
+
+We can visualise how far dispersion for the genes with stochastic monoallelic expression deviates from the expected dispersion for genes with similar expression
+```{r, fig.width=6.5, fig.height=4}
+gene = "Bex2"
+exp_theta <- plot_exp_disp(bb_test_res[[1]], gene = gene)
+
+#generating data frame for plotting
+plot_data <- makedf(a1_mat[[1]], tot_mat[[1]], gene = gene)
+ar_dist <- plot_distr(plot_data,  gene = gene)
+grid.arrange(exp_theta, ar_dist, ncol = 2)
+```
+
+Bex2 (brain expressed X-linked 2) gene shows strong bias towards the maternal (Bl6) allele. Its allelic variation greatly deviates  from the expected dispersion for genes with similar expression. We can compare the allelic distribution with a gene that does not show deviation from a common trend. For example, Npm1 gene.
+
+```{r}
+bb_test_res[[1]][c("Bex2", "Npm1"), c("AR", "tot_gene_mean", "fdr_mean", "fdr_disp")]
+```
+
+
+
+```{r, fig.width=6.5, fig.height=4}
+gene = "Npm1"
+exp_theta <- plot_exp_disp(bb_test_res[[1]], gene = gene)
+
+#generating data frame for plotting
+plot_data <- makedf(a1_mat[[1]], tot_mat[[1]], gene = gene)
+ar_dist <- plot_distr(plot_data,  gene = gene)
+grid.arrange(exp_theta, ar_dist, ncol = 2)
+```

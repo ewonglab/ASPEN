@@ -1,0 +1,8 @@
+pandoc: 3.1.1
+pkgdown: 2.1.1
+pkgdown_sha: ~
+articles:
+  allelic_imbalance: allelic_imbalance.html
+  allelic_variance: allelic_variance.html
+  dynamic_allelic_changes: dynamic_allelic_changes.html
+last_built: 2024-11-05T00:27Z
