@@ -16,3 +16,6 @@ library(devtools)
 
 devtools::install_github("ewonglab/ASPEN")
 ```
+## Tutorial
+
+For the step-by-step guide on how to use ASPEN, please see [ASPEN tutorial](https://ewonglab.github.io/ASPEN/) 
